@@ -33,11 +33,14 @@
  * to include some of the features provided by this implementation.  A
  * desired end state would have syntax like this:
  *
- *   CREATE MATERIALIZED VIEW schema_name.view_name AS
- *   SELECT ...
- *   WITH [UNLOGGED] HISTORY TABLE schema_name.view_name_updates,
- *        PRIMARY KEY (column_0, column_1, .., column_N),
- *        [DATA];
+ *   CREATE MATERIALIZED VIEW schema_name.view_name
+ *      [ ( <column-name> [, ...] ) ]
+ *      [ WITH ( storage_parameter [= value] [, ... ] ) ]
+ *      [ TABLESPACE tablespace_name ]
+ *   AS <query>
+ *   WITH [ [ UNLOGGED ] HISTORY TABLE [ schema_name.view_name_history ], ]
+ *        [ PRIMARY KEY ( <column-name> [, ...] ), ]
+ *        [ [ NO ] DATA ];
  *
  *
  * SYNOPSIS
@@ -101,10 +104,14 @@
  * something like:
  *
  *      CREATE MATERIALIZED VIEW name
+ *      AS ...
  *      WITH HISTORY = name_hist (id bigint, tstamp timestamp) ...;
  *
  *      REFRESH MATERIALIZED VIEW name CONCURRENTLY
  *      WITH (id, tstamp) AS (SELECT 123, current_timestamp);
+ *
+ *      -- Show deltas
+ *      SELECT id, tstamp, awld, noo FROM name_hist WHERE id >= 123;
  *
  * with deltas inserted into [name_hist] as (id, tstamp, awld, noo), where
  * [awld] and [noo] are columns storing values of record types containing rows
@@ -118,25 +125,24 @@
  *    record those changes in the view's history table as if the updates had
  *    happened via a refresh
  *
- * Since we're NOT going to patch Postgres for this, we PlPgSQL-code the
- * equivalent here, with a function interface.  If ever we patch Postgres we'd
- * probably import this implementation, wrap it in C-coded functions, and add
- * syntactic sugar.
+ * For now we PlPgSQL-code this.  If this is welcomed by the PostgreSQL
+ * community, then we should properly integrate this into PostgreSQL,
+ * with proper syntactic sugar and C coding as necessary.
  *
- * Our implementation is based entirely on PlPgSQL-coding what Postgres
- * actually does in C and SQL to implement MATERIALIZED VIEWs.  In fact, we do
- * it better (because more generically) and without any C code.
+ * Our implementation is based entirely on PlPgSQL-coding what
+ * PostgreSQL actually does in C and SQL to implement MATERIALIZED
+ * VIEWs.
  *
  * This file defines several functions for creating, refreshing, dropping
  * and/or undoing materialization of a view, and other operations.  See above.
  *
  * These "materialized views" look and feel almost exactly the same as a
- * Postgres MATERIALIZED VIEW that is REFRESHed CONCURRENTLY, with just the
- * additional capabilities mentioned above and with a function-based interface
- * rather than extended syntax.
+ * PostgreSQL MATERIALIZED VIEW that is REFRESHed CONCURRENTLY, with
+ * just the additional capabilities mentioned above and with a
+ * function-based interface rather than extended syntax.
  *
- * The generation of updates, copied from Postgres' internals, works as
- * follows:
+ * The generation of updates, copied from PostgreSQL' internals, works
+ * as follows:
  *
  *  - acquire an EXCLUSIVE LOCK on the materialized view
  *
@@ -155,42 +161,45 @@
  *
  *  - release the EXCLUSIVE LOCK
  *
- * We could do non-concurrent (atomic) updates by renaming the helper table
- * into place, just as non-concurrent materialization does in PG.  We'd still
- * do the FULL OUTER JOIN in that case in order to record the changes.
+ * We could do non-concurrent (atomic) updates by renaming the helper
+ * table into place, just as non-concurrent materialization does in PG.
+ * We'd still do the FULL OUTER JOIN in that case in order to record the
+ * changes.
  *
- * We will skip most of the sanity checks in the Postgres implementation of
- * MATERIALIZED VIEWs:
+ * We will skip most of the sanity checks in the PostgreSQL
+ * implementation of MATERIALIZED VIEWs:
  *
- *  - we will check if a view's materialization table has contents -- if not
- *    then instead of failing we'll update it but won't record the updates
+ *  - we will check if a view's materialization table has contents -- if
+ *    not then instead of failing we'll update it but won't record the
+ *    updates
  *
- *  - we will NOT check that the view's new contents has no duplicate rows;
- *    instead we'll simply not duplicate inserts in the update phase (or maybe
- *    rely on the view not generating duplicates, or maybe create a unique
- *    index across all columns).
+ *  - we will NOT check that the view's new contents has no duplicate
+ *    rows; instead we'll simply not duplicate inserts in the update
+ *    phase (or maybe rely on the view not generating duplicates, or
+ *    maybe create a unique index across all columns).
  *
- * We use the Postgres format() function to format SQL statements.  We use the
- * ability to refer to an entire row as a single object, and the ability to
- * have record types, to avoid having to refer to any columns from the
- * VIEW being materialized.
+ * We use the PostgreSQL format() function to format SQL statements.
  *
- * Because Postgres allows entire rows of tables to be compared for equality
- * without having to name the columns, the SQL statements needed to compute
- * updates of a view are very generic, with the only schema elements embedded
- * in them being table names.
+ * We use the ability to refer to an entire row as a single object, and
+ * the ability to have record types, to avoid having to refer to any
+ * columns from the VIEW being materialized.
+ *
+ * Because PostgreSQL allows entire rows of tables to be compared for
+ * equality without having to name the columns, the SQL statements
+ * needed to compute updates of a view are very generic, with the only
+ * schema elements embedded in them being table names.
  *
  * NOTES
  *
- *  - VIEWs with output rows that contain NULLs are not properly supported.
+ *  - VIEWs with output rows that contain NULLs are not properly
+ *    supported.
  *
  *    Each time a materialized view is refreshed that has NULLs in some
  *    rows' columns, those rows appear in the updates table as modified.
  *    This is a false positive.  If every row has a NULL in some column,
- *    then the updates table will be very noisy indeed.
+ *    then the updates table will be very noisy indeed!
  *
- *    This has to do with the semantics of JOINs when joining on row
- *    equality, and, of course, the semantics of NULL in SQL.  A row
+ *    This has to do with the semantics of equi-JOINs and NULL.  A row
  *    containing a NULL will not match itself in the new output of the
  *    view during refresh.
  *
@@ -203,17 +212,22 @@
  *    a MATERIALIZED VIEW), and UNIQUE INDEXes do allow NULLs, so a
  *    unique index created after creating the view does not help.  One
  *    could ALTER the materialized view to add UNIQUE() and NOT NULL
- *    constraints, and this could could generate a FULL OUTER JOIN ON
- *    query that uses only those columns that are part of a UNIQUE()
+ *    constraints, and then could generate a FULL OUTER JOIN ON query
+ *    that uses only those columns that are part of a UNIQUE()
  *    constraint, but what if there are multiple UNIQUE() constraints?
  *
  *    A new JOIN operator that is like NATURAL FULL OUTER JOIN but which
- *    only compares PK and/or NOT NULL columns, or which treats NULL =
- *    NULL as TRUE (almost certainly not desirable), would be one way to
- *    fix this.
+ *    only compares PK and/or NOT NULL columns, or which uses IS NOT
+ *    DISTINCT FROM instead of equality, would be one way to fix this:
+ *
+ *      NATURAL ... JOIN USING PRIMARY KEY
+ *      NATURAL ... JOIN USING DISTINCT
  *
  *    An improved CREATE MATERIALIZED VIEW statement could include a
- *    specification of a PRIMARY KEY, which would help.
+ *    specification of a PRIMARY KEY, which might help.
+ *
+ *    In any case, an equi-JOIN USING DISTINCT would be very convenient
+ *    in many other applications.
  *
  * IMPLEMENTATION NOTES
  *
