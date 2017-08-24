@@ -21,3 +21,8 @@ Source, LLC., to PostgreSQL:
     - allows DMLs on the materialized view, recording all changes in the
       updates table (this allows one to update a materialized view from
       a TRIGGER)
+
+ - schema2json.sql and schema2json.sh
+
+   A start at producing a JSON description of SQL schemas, leveraging
+   COMMENTs.
