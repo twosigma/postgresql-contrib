@@ -1,6 +1,28 @@
 /*
- * This file will have code to generate a JSON description of the entitlements
- * PG SQL schema.
+ * Copyright (c) 2017 Two Sigma Open Source, LLC.
+ * All Rights Reserved
+ *
+ * Permission to use, copy, modify, and distribute this software and its
+ * documentation for any purpose, without fee, and without a written agreement
+ * is hereby granted, provided that the above copyright notice and this
+ * paragraph and the following two paragraphs appear in all copies.
+ *
+ * IN NO EVENT SHALL TWO SIGMA OPEN SOURCE, LLC BE LIABLE TO ANY PARTY FOR
+ * DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+ * LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION,
+ * EVEN IF TWO SIGMA OPEN SOURCE, LLC HAS BEEN ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * TWO SIGMA OPEN SOURCE, LLC SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+ * BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN "AS IS"
+ * BASIS, AND TWO SIGMA OPEN SOURCE, LLC HAS NO OBLIGATIONS TO PROVIDE
+ * MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+ */
+
+/*
+ * This file will have code to generate a JSON description of a PG SQL
+ * schema.
  *
  * The accompanying schema2json.sh script uses these VIEWs to generate an
  * object per-TABLE that contains:
@@ -18,11 +40,17 @@
  * key/values.
  */
 
+/* Mini-preamble to load the bigger preamble */
+\set ON_ERROR_STOP on
+\set ROOT `echo "$ROOT"`
+\i :ROOT/backend/preamble.sql
 
-DROP SCHEMA IF EXISTS schema2json CASCADE;
-CREATE SCHEMA schema2json;
+CREATE SCHEMA IF NOT EXISTS schema2json;
 
-CREATE OR REPLACE VIEW schema2json.table_comments AS
+BEGIN;
+
+DROP VIEW IF EXISTS schema2json.table_comments CASCADE;
+CREATE VIEW schema2json.table_comments AS
 SELECT n.nspname AS schema_name,
     c.relname AS table_name,
     obj_description(c.oid, 'pg_class') AS "comment"
@@ -30,47 +58,63 @@ FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
 WHERE c.relkind = 'r';
 
+DROP VIEW IF EXISTS schema2json.enum_types CASCADE;
+CREATE VIEW schema2json.enum_types AS
+SELECT n.nspname AS enum_schema,
+       t.typname AS enum_name,
+       n.nspname || '.' || t.typname AS enum_fullname,
+       e.enumlabel AS enum_value
+FROM pg_type t
+JOIN pg_enum e ON t.oid = e.enumtypid
+JOIN pg_catalog.pg_namespace n on n.oid = t.typnamespace;
+
+DROP VIEW IF EXISTS schema2json.enum_types_json CASCADE;
+CREATE VIEW schema2json.enum_types_json AS
+SELECT t.enum_schema AS enum_schema,
+       t.enum_name AS enum_name,
+       t.enum_fullname AS enum_fullname,
+       json_agg(t.enum_value) AS enum_values
+FROM schema2json.enum_types t
+GROUP BY t.enum_schema, t.enum_name, t.enum_fullname;
+
 /*
- * Generate a list of columns per-table in the entitlements schema.
- *
- * TODO:
- *
- *  - add column types
- *  - make this output JSON
- *  - merge this with the foreign keys query below
+ * Generate a list of columns per-table.
  */
+DROP VIEW IF EXISTS schema2json.table_columns CASCADE;
 CREATE VIEW schema2json.table_columns AS
 SELECT ns.nspname AS schema_name,
        c.relname AS table_name,
        a.attname AS column_name,
+       a.attnum AS column_number,
        a.atttypid AS atttypid,
        a.atttypmod AS atttypmod,
        pg_catalog.format_type(a.atttypid, a.atttypmod) AS "type",
+       t.enum_values AS enum_values,
        col_description(a.attrelid, a.attnum) AS "comment"
 FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
 JOIN pg_catalog.pg_namespace ns ON c.relnamespace = ns.oid
+LEFT JOIN schema2json.enum_types_json t ON t.enum_fullname = pg_catalog.format_type(a.atttypid, a.atttypmod)
 WHERE c.relkind = 'r' AND NOT attisdropped AND
-      attname NOT IN ('tableoid', 'cmax', 'xmax', 'cmin', 'xmin', 'ctid');
+      attname NOT IN ('tableoid', 'cmax', 'xmax', 'cmin', 'xmin', 'ctid')
+ORDER BY a.attrelid, a.attnum;
 
+DROP VIEW IF EXISTS schema2json.table_columns_json CASCADE;
 CREATE VIEW schema2json.table_columns_json AS
 SELECT tc.schema_name AS schema_name,
        tc.table_name AS table_name,
        json_build_object('schema_name', tc.schema_name,
                          'table_name', tc.table_name,
                          'column_name', tc.column_name,
+                         'column_enum_values', tc.enum_values,
                          'comment', tc."comment") AS table_json
 FROM schema2json.table_columns tc;
 
 
 /*
- * Generate a description of the foreign keys of tables in the entitlements
- * schema.
- *
- * TODO:
- *
- *  - merge this with the above query
+ * Generate a description of the foreign keys of tables.
  */
+DROP VIEW IF EXISTS schema2json.fk2json CASCADE;
 CREATE VIEW schema2json.fk2json AS
 SELECT
     src.nspname AS schema_name,
@@ -154,28 +198,32 @@ JOIN (
     WHERE c.contype = 'f' AND dst.relkind = 'r'
     GROUP BY nsp.nspname, c.conname, dst.nspname, dst.relname, dst."comment"
 ) dst ON
-     src.constraint_name = dst.constraint_name
-WHERE src.nspname = 'entitlements' OR dst.nspname = 'entitlements';
+     src.constraint_name = dst.constraint_name;
 
-CREATE OR REPLACE VIEW schema2json.table_comments_json AS
+DROP VIEW IF EXISTS schema2json.table_comments_json CASCADE;
+CREATE VIEW schema2json.table_comments_json AS
 SELECT tc.schema_name, tc.table_name,
        json_build_object('schema_name', tc.schema_name,
                          'name', tc.table_name,
                          'comment', tc."comment") AS table_json
 FROM schema2json.table_comments tc;
 
+DROP VIEW IF EXISTS schema2json.table_with_columns_json CASCADE;
 CREATE VIEW schema2json.table_with_columns_json AS
 SELECT tc.schema_name AS schema_name,
        tc.table_name AS table_name,
        tc."comment" AS "comment",
        json_agg(json_build_object('name', tcc.column_name,
                                   'type', tcc."type",
+                                  'enum_values', tcc.enum_values,
+                                  'number', tcc.column_number,
                                   'comment', tcc."comment")) AS columns_json
 FROM schema2json.table_columns tcc
 JOIN schema2json.table_comments tc ON
     tcc.schema_name = tc.schema_name AND tcc.table_name = tc.table_name
 GROUP BY tc.schema_name, tc.table_name, tc."comment";
 
+DROP VIEW IF EXISTS schema2json.table_with_fk_json CASCADE;
 CREATE VIEW schema2json.table_with_fk_json AS
 SELECT tc.schema_name AS schema_name,
        tc.table_name AS table_name,
@@ -195,6 +243,7 @@ JOIN schema2json.fk2json tf ON
     tc.schema_name = tf.schema_name AND tc.table_name = tf.table_name
 GROUP BY tc.schema_name, tc.table_name, tc."comment";
 
+DROP VIEW IF EXISTS schema2json.table_with_columns_and_fk_json CASCADE;
 CREATE VIEW schema2json.table_with_columns_and_fk_json AS
 SELECT twc.schema_name AS schema_name,
        twc.table_name AS table_name,
@@ -204,6 +253,7 @@ SELECT twc.schema_name AS schema_name,
                          'columns', twc.columns_json,
                          'foreign_keys', twf.fk_json) AS table_json
 FROM schema2json.table_with_columns_json twc
-JOIN schema2json.table_with_fk_json twf ON
+LEFT JOIN schema2json.table_with_fk_json twf ON
     twf.schema_name = twc.schema_name AND twf.table_name = twc.table_name;
 
+COMMIT;

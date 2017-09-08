@@ -1,6 +1,27 @@
 #!/bin/bash
 #
-# This script generates a JSON description of the entitlements PG SQL schema as
+# Copyright (c) 2017 Two Sigma Open Source, LLC.
+# All Rights Reserved
+#
+# Permission to use, copy, modify, and distribute this software and its
+# documentation for any purpose, without fee, and without a written agreement
+# is hereby granted, provided that the above copyright notice and this
+# paragraph and the following two paragraphs appear in all copies.
+#
+# IN NO EVENT SHALL TWO SIGMA OPEN SOURCE, LLC BE LIABLE TO ANY PARTY FOR
+# DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+# LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION,
+# EVEN IF TWO SIGMA OPEN SOURCE, LLC HAS BEEN ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
+# TWO SIGMA OPEN SOURCE, LLC SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+# BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+# FOR A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN "AS IS"
+# BASIS, AND TWO SIGMA OPEN SOURCE, LLC HAS NO OBLIGATIONS TO PROVIDE
+# MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+#
+
+# This script generates a JSON description of a PG SQL schema as
 # a JSON object per-TABLE, containing, for each table, the following:
 #
 #  - the TABLE's name and schema name
@@ -15,11 +36,12 @@
 # This is produced by the schema2json.table_with_columns_and_fk_json VIEW,
 # then post-processed with jq(1) to parse any JSON COMMENTs and hoist their
 # key/values.
-#
 
 PROG=${0##*/}
 TOP=$(readlink --canonicalize "$0")
 TOP=${0%/*}
+
+set -euo pipefail
 
 if [[ $# -eq 0 || $1 = -h ]]; then
     cat <<EOF
@@ -35,26 +57,37 @@ EOF
     exit 1
 fi
 
-/opt/ts/bin/psql "$1" -t -f "$TOP/schema2json.sql" 1>&2
+psql "$1" -t -f "$TOP/schema2json.sql" 1>&2
 (
-/opt/ts/bin/psql "$1" -t -f - <<EOF
+psql "$1" -t -f - <<EOF
     SELECT table_json
     FROM schema2json.table_with_columns_and_fk_json
-    WHERE schema_name = '${2:-entitlements}';
+    WHERE schema_name = '${2}';
 EOF
 ) |
-    # Parse and hoist JSON COMMENTs
-    jq '
-    (..|.comment?|select(type=="string")) |=
-            (try fromjson catch .) |
-            (..|select(has("comment") and ((.comment|type) == ["null","object"][]))?) |=
-                ((.comment+.)|(.has_comment=(.comment!=null))|del(.comment))
-' |
-    # Copy/move single-column FKs' references into the one column
-    jq '
-    . as $tbl |
-    .columns[] |= (
-        .name as $column | .references = [$tbl | .foreign_keys[] |
-        select((.columns|length==1) and .columns[0] == $column) | .references]
-    ) | del(..?|.references?|select(length == 0))
+    jq -n '
+    def add($obj):
+        reduce ($obj|keys_unsorted[]) as $k (.;
+                             if has($k) then . else .[$k] = $obj[$k] end);
+    # Collect all modified inputs into a single top-level array, as if by -s
+    [ 
+        inputs |
+        # Parse and hoist JSON COMMENTs
+        (..|.comment?|select(type=="string")) |=
+                (try fromjson catch .) |
+                (..|select(has("comment") and ((.comment|type) == ["null","object"][]))?) |=
+                    ((add(.comment))|(.has_comment=(.comment!=null))|del(.comment)) |
+        # Copy/move single-column FK references into the one column
+        . as $tbl |
+        .columns[] |= (
+            .name as $column | .references = [$tbl | .foreign_keys?[]? |
+            select((.columns|length==1) and .columns[0] == $column) | .references]
+        ) | del(..?|.references?|select(length == 0)) |
+        del(..?|.enum_values?|select(.==null)) |
+        # Sort columns[] on .number
+        .columns |= (length as $n | sort_by(.order?//(.number * $n)))
+    ] |
+    # Make sure each table has .order
+    reduce range(length) as $n (.; .[$n].order //= $n) |
+    sort_by(.order)
 '
