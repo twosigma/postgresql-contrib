@@ -53,3 +53,15 @@ Source, LLC., to PostgreSQL:
    \i some_schema.sql
    SELECT backup.restore('some_schema'); -- restore some_schema's data
    ```
+
+ - `preamble.sql`
+
+   This is a file meant to be included from others.  Much of it should
+   really be replaced with new functionality in `psql(1)`, specifically, it
+   would be nice if `psql(1)` would set variables such as:
+
+    - `PG_CONNINFO` (the `conninfo` given to `psql`)
+    - `FNAME` (the path to the file given to `psql -f <file>`)
+
+   The code in this file checks that required variables are provided to
+   `psql(1)` via `--variable=` or via the environment.
