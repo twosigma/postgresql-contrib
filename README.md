@@ -54,6 +54,34 @@ Source, LLC., to PostgreSQL:
    SELECT backup.restore('some_schema'); -- restore some_schema's data
    ```
 
+ - `commit_trigger.sql`
+
+   An implementation of "COMMIT TRIGGERs", with natural and useful
+   semantics.  This is done using CONSTRAINT TRIGGERs under the hood.
+
+   Commit triggers run exactly once for all write transactions, may
+   perform additional data manipulations, and may RAISE EXCEPTIONs.
+
+   The point of this contribution is to demonstrate the need and desired
+   semantics of COMMIT TRIGGERs.
+
+   You can use commit triggers to do things like:
+
+    - update view materializations
+    - check consistency (e.g., in a double-entry book-keeping system,
+      maye sure that every entry has a matching entry, ...)
+    - NOTIFY
+    - anything else that you can imagine
+
+   Usage instructions inside.
+
+   ```
+   WARNING!  This relies on deferred CONSTRAINT TRIGGERs, but
+   unprivileged users may SET CONSTRAINTS ALL IMMEDIATE, which will
+   result in incorrect semantics for "commit triggers".  This can be
+   fatal for some applications.
+   ```
+
  - `preamble.sql`
 
    This is a file meant to be included from others.  Much of it should
