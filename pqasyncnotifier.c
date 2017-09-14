@@ -32,6 +32,7 @@
 #include <windows.h>
 #endif
 
+#define _GNU_SOURCE
 #include <sys/time.h>
 #include <sys/types.h>
 #include <errno.h>
