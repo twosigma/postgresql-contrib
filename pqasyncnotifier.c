@@ -28,7 +28,6 @@
  * Usage: pqasyncnotifier CONNINFO TABLE_NAME
  */
 
-#include <twosigma.h>
 #ifdef WIN32
 #include <windows.h>
 #endif
