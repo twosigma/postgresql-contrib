@@ -20,6 +20,7 @@
  * MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
  */
 
+/*
  * This file demonstrates how to create COMMIT, BEGIN, and session
  * CONNECT TRIGGERs for PostgreSQL using PlPgSQL only, via normal and
  * CONSTRAINT TRIGGERs.
