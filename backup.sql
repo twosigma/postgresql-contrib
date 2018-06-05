@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Two Sigma Open Source, LLC.
+ * Copyright (c) 2017-2018 Two Sigma Open Source, LLC.
  * All Rights Reserved
  *
  * Permission to use, copy, modify, and distribute this software and its
@@ -21,6 +21,7 @@
  */
 
 CREATE SCHEMA IF NOT EXISTS backup;
+SET search_path = "backup";
 
 CREATE OR REPLACE FUNCTION backup.drop_create_bkp_tbl(
     _src_schema TEXT,
@@ -38,7 +39,7 @@ BEGIN
         SELECT * FROM %1$I.%2$I;
         $q$,
     _src_schema, _tbl, _bkp_schema);
-END;$$ LANGUAGE PlPgSQL;
+END;$$ LANGUAGE PlPgSQL SET search_path FROM CURRENT;
 
 CREATE OR REPLACE FUNCTION backup.restore_tbl(
     _src_schema TEXT,
@@ -60,7 +61,7 @@ BEGIN
         ON CONFLICT DO NOTHING;
         $q$,
     _src_schema, _tbl, _bkp_schema);
-END;$$ LANGUAGE PlPgSQL;
+END;$$ LANGUAGE PlPgSQL SET search_path FROM CURRENT;
 
 CREATE OR REPLACE FUNCTION backup.backup(_schema TEXT)
 RETURNS VOID AS $$
@@ -74,9 +75,9 @@ BEGIN
     LOOP
         PERFORM backup.drop_create_bkp_tbl(_schema, tbl, _schema || '_backup');
     END LOOP;
-END;$$ LANGUAGE PlPgSQL;
+END;$$ LANGUAGE PlPgSQL SET search_path FROM CURRENT;
 
-CREATE OR REPLACE FUNCTION backup.restore(_schema TEXT DEFAULT)
+CREATE OR REPLACE FUNCTION backup.restore(_schema TEXT)
 RETURNS VOID AS $$
 DECLARE tbl TEXT;
 BEGIN
@@ -92,4 +93,4 @@ BEGIN
         PERFORM backup.restore_tbl(_schema, tbl, _schema || '_backup');
     END LOOP;
     SET session_replication_role = default;
-END;$$ LANGUAGE PlPgSQL;
+END;$$ LANGUAGE PlPgSQL SET search_path FROM CURRENT;
