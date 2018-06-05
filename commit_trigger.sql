@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Two Sigma Open Source, LLC.
+ * Copyright (c) 2017-2018 Two Sigma Open Source, LLC.
  * All Rights Reserved
  *
  * Permission to use, copy, modify, and distribute this software and its
@@ -19,7 +19,6 @@
  * BASIS, AND TWO SIGMA OPEN SOURCE, LLC HAS NO OBLIGATIONS TO PROVIDE
  * MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
  */
-
 /*
  * This file demonstrates how to create COMMIT, BEGIN, and session
  * CONNECT TRIGGERs for PostgreSQL using PlPgSQL only, via normal and
@@ -275,7 +274,7 @@ RETURNS TRIGGER AS $$
 DECLARE
     kind trigger_kind;
 BEGIN
-    RAISE NOTICE 'ENTER % % % % %', TG_NAME, TG_WHEN, TG_OP, TG_LEVEL,
+    RAISE DEBUG 'ENTER % % % % %', TG_NAME, TG_WHEN, TG_OP, TG_LEVEL,
         TG_TABLE_NAME;
     kind := (CASE TG_WHEN
              WHEN 'BEFORE' THEN 'BEGIN'
@@ -310,7 +309,7 @@ BEGIN
                 WHERE c.relname = 'session_trigger_called' AND
                       n.oid = pg_my_temp_schema()) THEN
             CREATE TEMP TABLE session_trigger_called ();
-            RAISE NOTICE 'Calling CONNECT triggers (txid = %)', txid_current();
+            RAISE DEBUG 'Calling CONNECT triggers (txid = %)', txid_current();
             PERFORM commit_trigger.invoke_triggers('CONNECT');
         END IF;
 
@@ -318,17 +317,17 @@ BEGIN
         SELECT kind
         ON CONFLICT DO NOTHING; /* Other half of debounce */
 
-        RAISE NOTICE 'Calling % triggers (txid = %)', kind, txid_current();
+        RAISE DEBUG 'Calling % triggers (txid = %)', kind, txid_current();
         PERFORM commit_trigger.invoke_triggers(kind);
 
         /* Keep trigger_called from getting too large */
         DELETE FROM commit_trigger.trigger_called
         WHERE _txid < txid_current() - 1000;
     ELSE
-        RAISE NOTICE 'DEBOUNCED';
+        RAISE DEBUG 'DEBOUNCED';
     END IF;
 
-    RAISE NOTICE 'EXIT % % % % %', TG_NAME, TG_WHEN, TG_OP, TG_LEVEL,
+    RAISE DEBUG 'EXIT % % % % %', TG_NAME, TG_WHEN, TG_OP, TG_LEVEL,
         TG_TABLE_NAME;
     IF TG_LEVEL = 'STATEMENT' THEN
         RETURN NULL;
