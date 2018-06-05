@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Two Sigma Open Source, LLC.
+ * Copyright (c) 2017-2018 Two Sigma Open Source, LLC.
  * All Rights Reserved
  *
  * Permission to use, copy, modify, and distribute this software and its
@@ -53,10 +53,11 @@ DROP VIEW IF EXISTS schema2json.table_comments CASCADE;
 CREATE VIEW schema2json.table_comments AS
 SELECT n.nspname AS schema_name,
     c.relname AS table_name,
+    CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE 'OTHER' END AS kind,
     obj_description(c.oid, 'pg_class') AS "comment"
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
-WHERE c.relkind = 'r';
+WHERE c.relkind IN ('r','v');
 
 DROP VIEW IF EXISTS schema2json.enum_types CASCADE;
 CREATE VIEW schema2json.enum_types AS
@@ -79,23 +80,38 @@ GROUP BY t.enum_schema, t.enum_name, t.enum_fullname;
 
 /*
  * Generate a list of columns per-table.
+ *
+ * TODO:
+ *
+ *  - add column types
+ *  - make this output JSON
+ *  - merge this with the foreign keys query below
  */
 DROP VIEW IF EXISTS schema2json.table_columns CASCADE;
 CREATE VIEW schema2json.table_columns AS
 SELECT ns.nspname AS schema_name,
        c.relname AS table_name,
+       CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE 'OTHER' END AS table_kind,
        a.attname AS column_name,
        a.attnum AS column_number,
        a.atttypid AS atttypid,
        a.atttypmod AS atttypmod,
        pg_catalog.format_type(a.atttypid, a.atttypmod) AS "type",
        t.enum_values AS enum_values,
+       (pk.conkey IS NOT NULL) AS is_primary_key,
+       (u.conkey IS NOT NULL) AS is_secondary_key,
        col_description(a.attrelid, a.attnum) AS "comment"
 FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
 JOIN pg_catalog.pg_namespace ns ON c.relnamespace = ns.oid
 LEFT JOIN schema2json.enum_types_json t ON t.enum_fullname = pg_catalog.format_type(a.atttypid, a.atttypmod)
-WHERE c.relkind = 'r' AND NOT attisdropped AND
+LEFT JOIN pg_catalog.pg_constraint pk ON
+        pk.conrelid = c.oid AND pk.contype = 'p' AND
+        array_length(pk.conkey,1) = 1 AND pk.conkey = ARRAY[a.attnum]
+LEFT JOIN pg_catalog.pg_constraint u ON
+        u.conrelid = c.oid AND u.contype = 'u' AND
+        array_length(u.conkey,1) = 1 AND u.conkey = ARRAY[a.attnum]
+WHERE c.relkind IN ('r','v') AND NOT attisdropped AND
       attname NOT IN ('tableoid', 'cmax', 'xmax', 'cmin', 'xmin', 'ctid')
 ORDER BY a.attrelid, a.attnum;
 
@@ -107,23 +123,61 @@ SELECT tc.schema_name AS schema_name,
                          'table_name', tc.table_name,
                          'column_name', tc.column_name,
                          'column_enum_values', tc.enum_values,
+                         'is_primary_key', tc.is_primary_key,
+                         'is_secondary_key', tc.is_secondary_key,
                          'comment', tc."comment") AS table_json
 FROM schema2json.table_columns tc;
 
+DROP VIEW IF EXISTS schema2json.keys CASCADE;
+CREATE VIEW schema2json.keys AS
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    con.conname AS constraint_name,
+    CASE con.contype
+        WHEN 'p' THEN 'PRIMARY KEY'
+        WHEN 'u' THEN 'SECONDARY KEY'
+        ELSE 'NONE' END AS constraint_type,
+    json_agg(a.attname) AS columns
+FROM pg_catalog.pg_namespace n
+JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
+LEFT JOIN (SELECT con.conname, con.contype, con.conrelid, unnest(con.conkey)
+      FROM pg_catalog.pg_constraint con
+      WHERE con.contype IN ('p','u')) con(conname, contype, conrelid, conattr)
+    ON con.conrelid = c.oid
+JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = con.conattr
+GROUP BY n.nspname, c.relname, con.conname, con.contype;
+
+DROP VIEW IF EXISTS schema2json.keys_json CASCADE;
+CREATE VIEW schema2json.keys_json AS
+SELECT k.schema_name AS schema_name,
+       k.table_name AS table_name,
+       json_agg(json_build_object(
+            'contraint_name', k.constraint_name,
+            'constraint_type', k.constraint_type,
+            'constraint_columns', k.columns)) AS key_constraint_json
+FROM schema2json.keys k
+GROUP BY k.schema_name, k.table_name;
 
 /*
  * Generate a description of the foreign keys of tables.
+ *
+ * TODO:
+ *
+ *  - merge this with the above query
  */
 DROP VIEW IF EXISTS schema2json.fk2json CASCADE;
 CREATE VIEW schema2json.fk2json AS
 SELECT
     src.nspname AS schema_name,
     src.relname AS table_name,
+    CASE src.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE 'OTHER' END AS table_kind,
     src.constraint_name AS fk_name,
     src.relattrs AS columns,
     dst."comment" AS "comment",
     dst.nspname AS dst_schema_name,
     dst.relname AS dst_table_name,
+    CASE dst.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE 'OTHER' END AS dst_table_kind,
     dst.relattrs AS dst_columns,
     json_build_object(
         'foreign_key_constraint_name',
@@ -141,6 +195,7 @@ FROM (
         c.conname constraint_name,
         src.nspname nspname,
         src.relname relname,
+        src.relkind relkind,
         json_agg(a.attname) relattrs
     FROM pg_catalog.pg_constraint c
     JOIN pg_catalog.pg_namespace nsp ON
@@ -163,14 +218,15 @@ FROM (
          src.conoid = c.oid
     JOIN pg_catalog.pg_attribute a ON
          a.attnum = src.attnum AND a.attrelid = c.conrelid
-    WHERE c.contype = 'f' AND src.relkind = 'r'
-    GROUP BY c.conname, src.nspname, src.relname
+    WHERE c.contype = 'f' AND src.relkind IN ('r','v')
+    GROUP BY c.conname, src.nspname, src.relname, src.relkind
 ) src
 JOIN (
     SELECT
         c.conname AS constraint_name,
         dst.nspname AS nspname,
         dst.relname AS relname,
+        dst.relkind AS relkind,
         dst."comment" AS "comment",
         json_agg(a.attname) AS relattrs
     FROM pg_catalog.pg_constraint c
@@ -195,8 +251,8 @@ JOIN (
          dst.conoid = c.oid
     JOIN pg_catalog.pg_attribute a ON
          a.attnum = dst.attnum AND a.attrelid = c.confrelid
-    WHERE c.contype = 'f' AND dst.relkind = 'r'
-    GROUP BY nsp.nspname, c.conname, dst.nspname, dst.relname, dst."comment"
+    WHERE c.contype = 'f' AND dst.relkind IN ('r','v')
+    GROUP BY nsp.nspname, c.conname, dst.nspname, dst.relname, dst.relkind, dst."comment"
 ) dst ON
      src.constraint_name = dst.constraint_name;
 
@@ -205,6 +261,7 @@ CREATE VIEW schema2json.table_comments_json AS
 SELECT tc.schema_name, tc.table_name,
        json_build_object('schema_name', tc.schema_name,
                          'name', tc.table_name,
+                         'kind', tc.kind,
                          'comment', tc."comment") AS table_json
 FROM schema2json.table_comments tc;
 
@@ -212,21 +269,25 @@ DROP VIEW IF EXISTS schema2json.table_with_columns_json CASCADE;
 CREATE VIEW schema2json.table_with_columns_json AS
 SELECT tc.schema_name AS schema_name,
        tc.table_name AS table_name,
+       tc.kind AS kind,
        tc."comment" AS "comment",
        json_agg(json_build_object('name', tcc.column_name,
                                   'type', tcc."type",
                                   'enum_values', tcc.enum_values,
                                   'number', tcc.column_number,
+                                  'is_primary_key', tcc.is_primary_key,
+                                  'is_secondary_key', tcc.is_secondary_key,
                                   'comment', tcc."comment")) AS columns_json
 FROM schema2json.table_columns tcc
 JOIN schema2json.table_comments tc ON
     tcc.schema_name = tc.schema_name AND tcc.table_name = tc.table_name
-GROUP BY tc.schema_name, tc.table_name, tc."comment";
+GROUP BY tc.schema_name, tc.table_name, tc.kind, tc."comment";
 
 DROP VIEW IF EXISTS schema2json.table_with_fk_json CASCADE;
 CREATE VIEW schema2json.table_with_fk_json AS
 SELECT tc.schema_name AS schema_name,
        tc.table_name AS table_name,
+       tc.kind AS kind,
        tc."comment" AS "comment",
        json_agg(
             json_build_object('name', tf.fk_name,
@@ -241,19 +302,28 @@ SELECT tc.schema_name AS schema_name,
 FROM schema2json.table_comments tc
 JOIN schema2json.fk2json tf ON
     tc.schema_name = tf.schema_name AND tc.table_name = tf.table_name
-GROUP BY tc.schema_name, tc.table_name, tc."comment";
+GROUP BY tc.schema_name, tc.table_name, tc.kind, tc."comment";
 
 DROP VIEW IF EXISTS schema2json.table_with_columns_and_fk_json CASCADE;
 CREATE VIEW schema2json.table_with_columns_and_fk_json AS
 SELECT twc.schema_name AS schema_name,
        twc.table_name AS table_name,
+       twc.kind AS kind,
        json_build_object('schema_name', twc.schema_name,
                          'table_name', twc.table_name,
+                         'kind', twc.kind,
                          'comment', twc."comment",
                          'columns', twc.columns_json,
+                         'keys', twk.key_constraint_json,
                          'foreign_keys', twf.fk_json) AS table_json
 FROM schema2json.table_with_columns_json twc
 LEFT JOIN schema2json.table_with_fk_json twf ON
-    twf.schema_name = twc.schema_name AND twf.table_name = twc.table_name;
+    twf.schema_name = twc.schema_name AND twf.table_name = twc.table_name
+LEFT JOIN schema2json.keys_json twk ON
+    twk.schema_name = twc.schema_name AND twk.table_name = twc.table_name;
+
+/* There's no private data in the schema itself */
+GRANT USAGE ON SCHEMA schema2json TO PUBLIC;
+GRANT SELECT ON ALL TABLES IN SCHEMA schema2json TO PUBLIC;
 
 COMMIT;
