@@ -22,9 +22,9 @@
 
 /*
  * NAME
- *  pseudo_mat_views
+ *  mat_views
  *
- * This file creates functions (in a schema named pseudo_mat_views) that
+ * This file creates functions (in a schema named mat_views) that
  * implement PlPgSQL-coded "MATERIALIZED" VIEWs (MV) supporting CONCURRENT
  * refreshes and, critically, saving of deltas, as well as triggers (on the
  * view or which modify the view), and indexes.
@@ -32,36 +32,34 @@
  *
  * SYNOPSIS
  *
- *  -- To create a pseudo-materialized VIEW:
+ *  -- To create an enhanced materialized VIEW:
  *  CREATE VIEW ...;
- *  SELECT pseudo_mat_views.create_view(schema_name,
- *                                      pseudo_view_name,
- *                                      orig_schema_name,
- *                                      orig_view_name);
+ *  SELECT mat_views.create_view(schema_name, view_name,
+ *                               orig_schema_name, orig_view_name);
  *
- *  -- To refresh a pseudo-materialized VIEW:
- *  SELECT pseudo_mat_views.refresh_view(schema_name, view_name);
- *  SELECT pseudo_mat_views.refresh_view(schema_name, view_name, id, tstamp);
+ *  -- To refresh an enhanced materialized VIEW:
+ *  SELECT mat_views.refresh_view(schema_name, view_name);
+ *  SELECT mat_views.refresh_view(schema_name, view_name, id, tstamp);
  *
  *  -- Or refresh with triggers disabled (faster if there are a lot of pending
  *  -- changes):
  *  SET session_replication_role = replica;
- *  SELECT pseudo_mat_views.refresh_view(schema_name, view_name);
- *  SELECT pseudo_mat_views.refresh_view(schema_name, view_name, id, tstamp);
+ *  SELECT mat_views.refresh_view(schema_name, view_name);
+ *  SELECT mat_views.refresh_view(schema_name, view_name, id, tstamp);
  *  SET session_replication_role = origin;
  *
- *  -- To drop a pseudo-materialized VIEW:
- *  SELECT pseudo_mat_views.drop_view(schema_name, view_name, cascade_bool);
+ *  -- To drop an enhanced materialized VIEW:
+ *  SELECT mat_views.drop_view(schema_name, view_name, cascade_bool);
  *
  *  -- Check if a materialized view needs to be refreshed:
- *  SELECT pseudo_mat_views.needs_refresh_p(schema_name, view_name);
- *  SELECT pseudo_mat_views.needs_refresh_p(schema_name, view_name, sla_interval);
+ *  SELECT mat_views.needs_refresh_p(schema_name, view_name);
+ *  SELECT mat_views.needs_refresh_p(schema_name, view_name, sla_interval);
  *
  *  -- To signal that a materialized view needs to be refreshed (this NOTIFYs
  *  -- subscribers):
- *  SELECT pseudo_mat_views.set_needs_refresh(schema_name, view_name);
- *  SELECT pseudo_mat_views.set_needs_refresh(schema_name, view_name, 'urgent');
- *  SELECT pseudo_mat_views.set_needs_refresh(schema_name, view_name, 'some other msg');
+ *  SELECT mat_views.set_needs_refresh(schema_name, view_name);
+ *  SELECT mat_views.set_needs_refresh(schema_name, view_name, 'urgent');
+ *  SELECT mat_views.set_needs_refresh(schema_name, view_name, 'some other msg');
  *
  *  -- To view a materialized view's history:
  *  SELECT * FROM <schema_name>.<view_name>_updates ...;
@@ -70,17 +68,17 @@
  *  SELECT * FROM <orig_schema_name>.<orig_view_name> ...;
  *
  *  -- To set a VIEW's update SLA to 5 minutes:
- *  UPDATE pseudo_mat_views.state
+ *  UPDATE mat_views.state
  *  SET sla = interval '5 minutes'
  *  WHERE schema_name = '<schema_name>' AND view_name = '<view_name>';
  *
  *  -- To cause periodic refreshes (by an external daemon)
- *  UPDATE pseudo_mat_views.state
+ *  UPDATE mat_views.state
  *  SET periodic_refresh_needed = true
  *  WHERE schema_name = '<schema_name>' AND view_name = '<view_name>';
  *
  *  -- To set a VIEW's notification channel:
- *  UPDATE pseudo_mat_views.state
+ *  UPDATE mat_views.state
  *  SET needs_refresh_notify_channel = '<channel_name>'
  *  WHERE schema_name = '<schema_name>' AND view_name = '<view_name>';
  *
@@ -130,7 +128,7 @@
  * actually does in C and SQL to implement MATERIALIZED VIEWs.
  *
  * This file defines several functions for creating, refreshing, and dropping
- * "pseudo"-materialized views, and other related operations.  See above.
+ * enhanced materialized views, and other related operations.  See above.
  *
  * These "materialized views" look and feel almost exactly the same as a
  * Postgres MATERIALIZED VIEW that is REFRESHed CONCURRENTLY, with just the
@@ -241,13 +239,13 @@ SET client_min_messages TO WARNING;
 --RESET SESSION AUTHORIZATION; /* run as superuser pls */
 
 /* It's safe to source this file repeatedly */
-CREATE SCHEMA IF NOT EXISTS pseudo_mat_views;
-SET search_path = "pseudo_mat_views";
+CREATE SCHEMA IF NOT EXISTS mat_views;
+SET search_path = "mat_views";
 CREATE SEQUENCE IF NOT EXISTS tx_id;
 
-DROP EVENT TRIGGER IF EXISTS pseudo_mat_views_drop_state_trig CASCADE;
+DROP EVENT TRIGGER IF EXISTS mat_views_drop_state_trig CASCADE;
 
-CREATE OR REPLACE VIEW pseudo_mat_views.triggers AS
+CREATE OR REPLACE VIEW mat_views.triggers AS
 SELECT t.tgname     AS tg_name,
        CASE
         WHEN t.tgenabled = 'A' THEN TRUE
@@ -269,15 +267,15 @@ JOIN pg_proc p on t.tgfoid = p.oid
 JOIN pg_namespace pn on p.pronamespace = pn.oid
 WHERE pn.nspname <> 'pg_catalog';
 
-CREATE SEQUENCE IF NOT EXISTS pseudo_mat_views.serial MINVALUE 0 START WITH 0;
+CREATE SEQUENCE IF NOT EXISTS mat_views.serial MINVALUE 0 START WITH 0;
 
-CREATE TABLE IF NOT EXISTS pseudo_mat_views.state (
+CREATE TABLE IF NOT EXISTS mat_views.state (
     schema_name text,
     view_name text,
     source_schema_name text,
     source_view_name text,
     /* Views with lower refresh_order are refreshed first */
-    refresh_order integer UNIQUE DEFAULT (nextval('pseudo_mat_views.serial')),
+    refresh_order integer UNIQUE DEFAULT (nextval('mat_views.serial')),
     periodic_refresh_needed boolean DEFAULT false,
     sla interval,
     debounce interval,
@@ -291,7 +289,7 @@ CREATE TABLE IF NOT EXISTS pseudo_mat_views.state (
     txid bigint
  );
 
-CREATE TABLE IF NOT EXISTS pseudo_mat_views.refresh_history (
+CREATE TABLE IF NOT EXISTS mat_views.refresh_history (
     _schema         TEXT,
     _view           TEXT,
     _txid           BIGINT NOT NULL DEFAULT (txid_current()),
@@ -304,15 +302,15 @@ CREATE TABLE IF NOT EXISTS pseudo_mat_views.refresh_history (
     PRIMARY KEY (_schema, _view, _op, _txid)
 );
 
-CREATE INDEX IF NOT EXISTS idx_refresh_history1 ON pseudo_mat_views.refresh_history
+CREATE INDEX IF NOT EXISTS idx_refresh_history1 ON mat_views.refresh_history
     (_txid);
-CREATE INDEX IF NOT EXISTS idx_refresh_history2 ON pseudo_mat_views.refresh_history
+CREATE INDEX IF NOT EXISTS idx_refresh_history2 ON mat_views.refresh_history
     (_start);
 
-CREATE OR REPLACE FUNCTION pseudo_mat_views.update_txid()
+CREATE OR REPLACE FUNCTION mat_views.update_txid()
 RETURNS trigger AS $$
 BEGIN
-    UPDATE pseudo_mat_views.state
+    UPDATE mat_views.state
     SET txid = txid_current()
     WHERE schema_name = TG_TABLE_SCHEMA AND view_name = TG_TABLE_NAME;
     RETURN NULL;
@@ -320,8 +318,8 @@ END; $$ LANGUAGE PLPGSQL VOLATILE SET search_path FROM CURRENT;
 
 /* Supporting function */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.drop_triggers(given_schema_name text,
-        given_view_name text)
+    mat_views.drop_triggers(given_schema_name text,
+                            given_view_name text)
 RETURNS void AS $$
 DECLARE
     _prefix TEXT := '_' || given_schema_name || '__' || given_view_name;
@@ -339,13 +337,13 @@ $$ LANGUAGE plpgsql VOLATILE SET search_path FROM CURRENT;
 
 /* Supporting function */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.create_triggers(given_schema_name text,
-        given_view_name text)
+    mat_views.create_triggers(given_schema_name text,
+                              given_view_name text)
 RETURNS void AS $$
 DECLARE
     _prefix TEXT := '_' || given_schema_name || '__' || given_view_name;
 BEGIN
-    PERFORM pseudo_mat_views.drop_triggers(given_schema_name, given_view_name);
+    PERFORM mat_views.drop_triggers(given_schema_name, given_view_name);
 
     /*
      * XXX Make a single trigger procedure (function) and a single trigger
@@ -444,19 +442,19 @@ BEGIN
         given_view_name || '_updates', given_view_name || '_new');
 
     IF NOT EXISTS (SELECT *
-               FROM pseudo_mat_views.triggers
+               FROM mat_views.triggers
                WHERE tg_name = _prefix || '_upd_txid') THEN
         EXECUTE format($q$
                 CREATE TRIGGER %3$I
                 AFTER INSERT OR UPDATE OR DELETE ON %1$I.%2$I
                 FOR EACH STATEMENT
-                EXECUTE PROCEDURE pseudo_mat_views.update_txid();
+                EXECUTE PROCEDURE mat_views.update_txid();
             $q$, given_schema_name, given_view_name,
             _prefix || '_upd_txid');
     END IF;
 
     IF NOT EXISTS (SELECT *
-               FROM pseudo_mat_views.triggers
+               FROM mat_views.triggers
                WHERE tg_name = _prefix || '_ins_trigger') THEN
         EXECUTE format($q$
                 CREATE TRIGGER %3$I AFTER INSERT ON %1$I.%2$I
@@ -468,7 +466,7 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (SELECT *
-               FROM pseudo_mat_views.triggers
+               FROM mat_views.triggers
                WHERE tg_name = _prefix || '_upd_trigger') THEN
         EXECUTE format($q$
                 CREATE TRIGGER %3$I AFTER UPDATE ON %1$I.%2$I
@@ -480,7 +478,7 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (SELECT *
-               FROM pseudo_mat_views.triggers
+               FROM mat_views.triggers
                WHERE tg_name = _prefix || '_del_trigger') THEN
         EXECUTE format($q$
                 CREATE TRIGGER %3$I AFTER DELETE ON %1$I.%2$I
@@ -516,21 +514,21 @@ $$ LANGUAGE plpgsql VOLATILE SET search_path FROM CURRENT;
  * "_updates", will be created and maintained with history.
  *
  * You can refresh the materialization (concurrently) at any time by calling
- * pseudo_mat_views.refresh_view() or pseudo_mat_views.refresh_views().
+ * mat_views.refresh_view() or mat_views.refresh_views().
  *
  * Example:
  *
  *  CREATE VIEW foo.bar_source AS SELECT ...;
  *
  *  -- Create a materialized view named foo.bar:
- *  SELECT pseudo_mat_views.create_view('foo','bar','foo','bar_source')
+ *  SELECT mat_views.create_view('foo','bar','foo','bar_source')
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.create_view(given_schema_name text,
-                                 given_view_name text,
-                                 given_source_schema_name text,
-                                 given_source_view_name text,
-                                 _if_not_exists boolean default(false))
+    mat_views.create_view(given_schema_name text,
+                          given_view_name text,
+                          given_source_schema_name text,
+                          given_source_view_name text,
+                          _if_not_exists boolean default(false))
 RETURNS void AS $$
 DECLARE
     /*
@@ -549,7 +547,7 @@ BEGIN
     THEN
         RETURN;
     END IF;
-    DELETE FROM pseudo_mat_views.state
+    DELETE FROM mat_views.state
     WHERE schema_name = given_schema_name AND view_name = given_view_name;
 
     /* Note that format()'s %n$ notation is one-based... */
@@ -616,8 +614,8 @@ BEGIN
         $q$, given_schema_name, given_view_name || '_updates',
         _prefix || '_updates_idx_noo');
 
-    /* Register this pseudo-materialized view */
-    INSERT INTO pseudo_mat_views.state
+    /* Register this enhanced materialized view */
+    INSERT INTO mat_views.state
         (schema_name, view_name, source_schema_name, source_view_name,
          needs_refresh, last_update, txid, needs_first_refresh)
     SELECT given_schema_name, given_view_name,
@@ -625,12 +623,12 @@ BEGIN
         CAST(current_timestamp AS timestamp without time zone),
         txid_current(), true
     /* If it wasn't already registered */
-    WHERE NOT EXISTS (SELECT * FROM pseudo_mat_views.state
+    WHERE NOT EXISTS (SELECT * FROM mat_views.state
                       WHERE schema_name = given_schema_name AND
                             view_name = given_view_name);
 
     /* Create triggers */
-    PERFORM pseudo_mat_views.create_triggers(given_schema_name, given_view_name);
+    PERFORM mat_views.create_triggers(given_schema_name, given_view_name);
 END
 $$ LANGUAGE plpgsql VOLATILE SET search_path FROM CURRENT;
 
@@ -657,7 +655,7 @@ $$ LANGUAGE plpgsql VOLATILE SET search_path FROM CURRENT;
  * "_updates", will be created and maintained with history.
  *
  * You can refresh the materialization (concurrently) at any time by calling
- * pseudo_mat_views.refresh_view() or pseudo_mat_views.refresh_views().
+ * mat_views.refresh_view() or mat_views.refresh_views().
  *
  * The original view will be renamed away and a materialization table of the
  * same original name will be created.
@@ -669,32 +667,32 @@ $$ LANGUAGE plpgsql VOLATILE SET search_path FROM CURRENT;
  *
  *  -- Create a materialized view named foo.bar:
  *  CREATE VIEW foo.bar AS SELECT ...;
- *  SELECT pseudo_mat_views.create_view('foo','bar');
+ *  SELECT mat_views.create_view('foo','bar');
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.create_view(given_schema_name text,
-                                 given_view_name text,
-                                 _if_not_exists boolean default(false))
+    mat_views.create_view(given_schema_name text,
+                          given_view_name text,
+                          _if_not_exists boolean default(false))
 RETURNS void AS $$
 BEGIN
     EXECUTE format($q$
         ALTER VIEW IF EXISTS %1$I.%2$I RENAME TO %3$I;
     $q$, given_schema_name, given_view_name, given_view_name || '_source');
-    PERFORM pseudo_mat_views.create_view(given_schema_name, given_view_name,
+    PERFORM mat_views.create_view(given_schema_name, given_view_name,
         given_schema_name, given_view_name || '_source',_if_not_exists);
 END $$ LANGUAGE plpgsql VOLATILE SET search_path FROM CURRENT;
 
 /**
- * Drop a materialized view created by pseudo_mat_views.create_view().
+ * Drop a materialized view created by mat_views.create_view().
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.drop_view(given_schema_name text, given_view_name text,
+    mat_views.drop_view(given_schema_name text, given_view_name text,
         do_cascade boolean default (false))
 RETURNS void AS $$
 DECLARE
     c text = CASE do_cascade WHEN true THEN 'CASCADE' ELSE '' END;
 BEGIN
-    PERFORM pseudo_mat_views.drop_triggers(given_schema_name, given_view_name);
+    PERFORM mat_views.drop_triggers(given_schema_name, given_view_name);
     EXECUTE format($q$
             DROP TABLE IF EXISTS %1$I.%2$I %3s;
         $q$, given_schema_name, given_view_name || '_updates', c);
@@ -709,14 +707,14 @@ BEGIN
         $q$, given_schema_name, given_view_name, c);
 
     /* "Unregister" the view */
-    DELETE FROM pseudo_mat_views.state
+    DELETE FROM mat_views.state
     WHERE schema_name = given_schema_name AND view_name = given_view_name;
 END
 $$ LANGUAGE plpgsql VOLATILE SET search_path FROM CURRENT;
 
 /* Private: unused */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views._have_lock(_schema text, _table text)
+    mat_views._have_lock(_schema text, _table text)
 RETURNS boolean AS $$
     SELECT EXISTS (
         SELECT *
@@ -731,7 +729,7 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
 /* Private: returns true if table has a PRIMARY KEY constraint */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views._has_pk(_schema text, _view text)
+    mat_views._has_pk(_schema text, _view text)
 RETURNS boolean AS $$
 SELECT EXISTS (
     SELECT *
@@ -744,9 +742,9 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
 /* Private: returns string list of columns in constraint */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views._constraint_cols(_schema text,
-                                      _view text,
-                                      _conname text DEFAULT (NULL))
+    mat_views._constraint_cols(_schema text,
+                               _view text,
+                               _conname text DEFAULT (NULL))
 RETURNS text AS $$
 SELECT string_agg(format('%I',a.attname),',')
 FROM (SELECT c.oid AS tbloid, unnest(cc.conkey) AS aid
@@ -761,14 +759,14 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
 /* Private: returns full outer join clause for refresh delta computation */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views._using(_schema text,
-                            _view text,
-                            _conname text DEFAULT (NULL))
+    mat_views._using(_schema text,
+                     _view text,
+                     _conname text DEFAULT (NULL))
 RETURNS text AS $$
-SELECT CASE pseudo_mat_views._has_pk(_schema, _view)
+SELECT CASE mat_views._has_pk(_schema, _view)
        WHEN TRUE THEN
             'USING (' ||
-                pseudo_mat_views._constraint_cols(_schema, _view, _conname) ||
+                mat_views._constraint_cols(_schema, _view, _conname) ||
                 ')'
        ELSE ''
        END;
@@ -783,7 +781,7 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
  * decomposition automatically, so equi-joins on record values can be slow.
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views._gen_eq(
+    mat_views._gen_eq(
         _schema        text, -- schema of table whose PK column list to use
         _table         text, -- table whose PK column list to use
         _left_src      text, -- name of left  table source
@@ -819,10 +817,10 @@ END; $$ LANGUAGE PLPGSQL VOLATILE SET search_path FROM CURRENT;
 
 /* Private: returns SET clause for UPDATE excluding cols from constraint */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views._update_set_cols(_schema text,
-                                      _view text,
-                                      _src text,
-                                      _conname text DEFAULT (NULL))
+    mat_views._update_set_cols(_schema text,
+                               _view text,
+                               _src text,
+                               _conname text DEFAULT (NULL))
 RETURNS text AS $$
 SELECT string_agg(format('%1$I = (%2$s).%1$I', a.attname, _src),', ')
 FROM pg_catalog.pg_class c
@@ -840,7 +838,7 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
 /**
  * Concurrently update a materialized view as created by
- * pseudo_mat_views.create_view().
+ * mat_views.create_view().
  *
  * Updates will be recorded in a table named ${original_view_name}_updates,
  * which will have these columns:
@@ -853,16 +851,16 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
  * The given `id' should not have been used already in the history table.
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.refresh_view(given_schema_name text,
-        given_view_name text,
-        tstamp timestamp without time zone DEFAULT (current_timestamp))
+    mat_views.refresh_view(given_schema_name text,
+                           given_view_name text,
+                           tstamp timestamp without time zone DEFAULT (current_timestamp))
 RETURNS void AS $$
 DECLARE
     _source_schema_name text;
     _source_view_name text;
     _starttime TIMESTAMP WITHOUT TIME ZONE := clock_timestamp();
     t TIMESTAMP WITHOUT TIME ZONE;
-    _state pseudo_mat_views.state;
+    _state mat_views.state;
     _prefix TEXT := '_' || given_schema_name || '__' || given_view_name;
 
     /* For warning/notice/info messages */
@@ -873,12 +871,12 @@ DECLARE
     _sample record;
 BEGIN
     SELECT * INTO _state
-    FROM pseudo_mat_views.state
+    FROM mat_views.state
     WHERE schema_name = given_schema_name AND
           view_name = given_view_name;
 
     IF _state IS NULL THEN
-        RAISE EXCEPTION 'Pseudo-materialized view %.% does not exist',
+        RAISE EXCEPTION 'Enhanced materialized view %.% does not exist',
             given_schema_name, given_view_name;
     END IF;
 
@@ -889,11 +887,11 @@ BEGIN
         given_view_name, clock_timestamp();
 
     /* Keep refresh history small */
-    DELETE FROM pseudo_mat_views.refresh_history
+    DELETE FROM mat_views.refresh_history
     WHERE _start < current_timestamp - '7 days'::interval;
 
     /* Record refresh history */
-    INSERT INTO pseudo_mat_views.refresh_history
+    INSERT INTO mat_views.refresh_history
         (_schema, _view, _op)
     SELECT given_schema_name, given_view_name, 'refresh';
 
@@ -910,7 +908,7 @@ BEGIN
     RAISE DEBUG 'refresh 1 % %', clock_timestamp(), clock_timestamp() - t;
 
     IF (SELECT needs_first_refresh
-        FROM pseudo_mat_views.state
+        FROM mat_views.state
         WHERE schema_name = given_schema_name AND
               view_name = given_view_name) THEN
 
@@ -960,9 +958,9 @@ BEGIN
                       noo IS NOT DISTINCT FROM NULL;
             $q$, given_schema_name, given_view_name,
             given_view_name || '_new', given_view_name || '_deltas',
-            CASE pseudo_mat_views._has_pk(given_schema_name, given_view_name)
+            CASE mat_views._has_pk(given_schema_name, given_view_name)
                 WHEN TRUE THEN '' ELSE 'NATURAL' END,
-            pseudo_mat_views._using(given_schema_name, given_view_name));
+            mat_views._using(given_schema_name, given_view_name));
         RAISE DEBUG 'refresh 5 % %', clock_timestamp(), clock_timestamp() - t;
         EXECUTE format($q$
                 SELECT count(*) FROM %1$I.%2$I
@@ -1024,7 +1022,7 @@ BEGIN
              * materialization table.
              */
             RAISE DEBUG 'refresh 6 % %', clock_timestamp(), clock_timestamp() - t;
-            IF NOT pseudo_mat_views._has_pk(given_schema_name, given_view_name) THEN
+            IF NOT mat_views._has_pk(given_schema_name, given_view_name) THEN
                 /*
                  * We have to do a DELETE with a JOIN, either USING, or WHERE
                  * ... IN (SELECT ..)).  Specifically an equi-join.
@@ -1060,7 +1058,7 @@ BEGIN
                               upd.awld IS DISTINCT FROM NULL;
                     $q$,
                     given_schema_name, given_view_name, given_view_name || '_deltas',
-                    pseudo_mat_views._gen_eq(given_schema_name,
+                    mat_views._gen_eq(given_schema_name,
                                              given_view_name,
                                              'mv', 'upd', null, 'awld'));
             END IF;
@@ -1074,7 +1072,7 @@ BEGIN
                     ON CONFLICT DO NOTHING;
                 $q$, given_schema_name, given_view_name, given_view_name || '_deltas');
             RAISE DEBUG 'refresh 8 % %', clock_timestamp(), clock_timestamp() - t;
-            IF pseudo_mat_views._has_pk(given_schema_name, given_view_name) THEN
+            IF mat_views._has_pk(given_schema_name, given_view_name) THEN
                 EXECUTE format($q$
                         UPDATE %1$I.%2$I AS mv
                         SET %4$s
@@ -1083,8 +1081,8 @@ BEGIN
                               upd.noo  IS DISTINCT FROM NULL AND
                               (%5$s) IN (SELECT %5$s FROM (SELECT (upd.noo).*) q);
                     $q$, given_schema_name, given_view_name, given_view_name || '_deltas',
-                    pseudo_mat_views._update_set_cols(given_schema_name, given_view_name, 'mv', 'upd.noo'),
-                    pseudo_mat_views._constraint_cols(given_schema_name, given_view_name));
+                    mat_views._update_set_cols(given_schema_name, given_view_name, 'mv', 'upd.noo'),
+                    mat_views._constraint_cols(given_schema_name, given_view_name));
             END IF;
             RAISE DEBUG 'refresh 9 % %', clock_timestamp(), clock_timestamp() - t;
 
@@ -1093,7 +1091,7 @@ BEGIN
              * disabled.
              */
             IF (SELECT count(*)
-                FROM pseudo_mat_views.triggers
+                FROM mat_views.triggers
                 WHERE tg_enabled_now AND
                       tg_name IN (_prefix || '_ins_trigger',
                                   _prefix || '_upd_trigger',
@@ -1111,7 +1109,7 @@ BEGIN
     END IF;
     RAISE DEBUG 'refresh 10 % %', clock_timestamp(), clock_timestamp() - t;
 
-    UPDATE pseudo_mat_views.state
+    UPDATE mat_views.state
     SET needs_refresh = false,
         needs_first_refresh = false,
         last_update = CAST(_starttime AS timestamp without time zone),
@@ -1123,7 +1121,7 @@ BEGIN
 
     RAISE DEBUG 'refresh 11 % %', clock_timestamp(), clock_timestamp() - t;
 
-    UPDATE pseudo_mat_views.refresh_history
+    UPDATE mat_views.refresh_history
     SET _end = clock_timestamp()
     WHERE _schema = given_schema_name AND _view = given_view_name AND
           _op = 'refresh' AND
@@ -1131,7 +1129,7 @@ BEGIN
 
     RAISE DEBUG 'refresh 12 % %', clock_timestamp(), clock_timestamp() - _starttime;
 
-    UPDATE pseudo_mat_views.state
+    UPDATE mat_views.state
     SET txid = txid_current()
     WHERE schema_name = given_schema_name AND view_name = given_view_name;
     RAISE DEBUG 'refresh 13 % %', clock_timestamp(), clock_timestamp() - _starttime;
@@ -1142,22 +1140,22 @@ $$ LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT;
  * Refresh multiple views, in declared/default refresh order.
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.refresh_views(given_schema_name text DEFAULT (NULL),
-        tstamp timestamp without time zone DEFAULT (current_timestamp))
+    mat_views.refresh_views(given_schema_name text DEFAULT (NULL),
+                            tstamp timestamp without time zone DEFAULT (current_timestamp))
 RETURNS void AS $$
 DECLARE
     r record;
 BEGIN
     FOR r IN (
             SELECT schema_name, view_name, refresh_enabled
-            FROM pseudo_mat_views.state
+            FROM mat_views.state
             WHERE given_schema_name IS NULL OR
                   given_schema_name = schema_name
             ORDER BY refresh_order asc
         )
     LOOP
         CONTINUE WHEN NOT r.refresh_enabled;
-        PERFORM pseudo_mat_views.refresh_view(r.schema_name, r.view_name, tstamp);
+        PERFORM mat_views.refresh_view(r.schema_name, r.view_name, tstamp);
     END LOOP;
 END
 $$ LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT;
@@ -1167,30 +1165,30 @@ $$ LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT;
  * channel(s).
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.set_needs_refresh(given_schema_name text,
-        given_view_name text, msg text)
+    mat_views.set_needs_refresh(given_schema_name text,
+                                given_view_name text, msg text)
 RETURNS void AS $$
-    UPDATE pseudo_mat_views.state
+    UPDATE mat_views.state
     SET needs_refresh = true
     WHERE schema_name = given_schema_name AND view_name = given_view_name;
     -- NOTIFY global subscribers
-    SELECT pg_notify('pseudo_mat_views',
+    SELECT pg_notify('mat_views',
         format('NEEDS_REFRESH:%I.%I:%s', given_schema_name, given_view_name,
             coalesce(msg, '')));
 
     -- NOTIFY view-specpfic subscribers; empty message -> needs refresh
     SELECT pg_notify(needs_refresh_notify_channel, coalesce(msg, ''))
-    FROM pseudo_mat_views.state
+    FROM mat_views.state
     WHERE schema_name = given_schema_name AND view_name = given_view_name AND
         needs_refresh_notify_channel IS NOT NULL AND
         needs_refresh_notify_channel != '';
 $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.set_needs_refresh(given_schema_name text,
-        given_view_name text)
+    mat_views.set_needs_refresh(given_schema_name text,
+                                given_view_name text)
 RETURNS void AS $$
-SELECT pseudo_mat_views.set_needs_refresh(given_schema_name, given_view_name,
+SELECT mat_views.set_needs_refresh(given_schema_name, given_view_name,
     NULL);
 $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
@@ -1198,11 +1196,13 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
  * Returns true if a materialized view needs to be refreshed.
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.needs_refresh_p(given_schema_name text,
-        given_view_name text, given_sla interval, given_debounce interval)
+    mat_views.needs_refresh_p(given_schema_name text,
+                              given_view_name text,
+                              given_sla interval,
+                              given_debounce interval)
 RETURNS boolean AS $$
     SELECT true
-    FROM pseudo_mat_views.state
+    FROM mat_views.state
     WHERE schema_name = given_schema_name AND view_name = given_view_name AND
         (needs_refresh OR needs_first_refresh OR
          (last_update +
@@ -1221,8 +1221,10 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
  * all.
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.time_to_next_refresh(given_schema_name text,
-        given_view_name text, given_sla interval, given_debounce interval)
+    mat_views.time_to_next_refresh(given_schema_name text,
+                                   given_view_name text,
+                                   given_sla interval,
+                                   given_debounce interval)
 RETURNS interval AS $$
     SELECT
         CASE WHEN needs_refresh OR needs_first_refresh OR periodic_refresh_needed THEN
@@ -1231,7 +1233,7 @@ RETURNS interval AS $$
                          coalesce(given_sla, sla, interval '10 minutes') / 4) -
                 CAST(clock_timestamp() AS timestamp without time zone)
         ELSE null::interval END
-    FROM pseudo_mat_views.state
+    FROM mat_views.state
     WHERE schema_name = given_schema_name AND view_name = given_view_name;
 $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
@@ -1239,10 +1241,11 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
  * Returns true if a materialized view needs to be refreshed.
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.needs_refresh_p(given_schema_name text,
-        given_view_name text, given_sla interval)
+    mat_views.needs_refresh_p(given_schema_name text,
+                              given_view_name text,
+                              given_sla interval)
 RETURNS boolean AS $$
-    SELECT pseudo_mat_views.needs_refresh_p(given_schema_name, given_view_name,
+    SELECT mat_views.needs_refresh_p(given_schema_name, given_view_name,
         given_sla, NULL::interval);
 $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
@@ -1250,9 +1253,9 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
  * Returns true if a materialized view needs to be refreshed.
  */
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.needs_refresh_p(given_schema_name text, given_view_name text)
+    mat_views.needs_refresh_p(given_schema_name text, given_view_name text)
 RETURNS boolean AS $$
-    SELECT pseudo_mat_views.needs_refresh_p(given_schema_name, given_view_name,
+    SELECT mat_views.needs_refresh_p(given_schema_name, given_view_name,
         NULL::interval);
 $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
@@ -1261,118 +1264,118 @@ $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
 /* Tests */
 
-SELECT set_config('pseudo_mat_views.test_value', 'abc', false);
-SELECT set_config('pseudo_mat_views.test_value2', '123', false);
-SELECT set_config('pseudo_mat_views.test_value3', 'xyz', false);
-SELECT pseudo_mat_views.drop_view('pseudo_mat_views', 'test_view', true);
-DROP VIEW IF EXISTS pseudo_mat_views.test_view_source;
-CREATE VIEW pseudo_mat_views.test_view_source AS
-SELECT current_setting('pseudo_mat_views.test_value') AS c
+SELECT set_config('mat_views.test_value', 'abc', false);
+SELECT set_config('mat_views.test_value2', '123', false);
+SELECT set_config('mat_views.test_value3', 'xyz', false);
+SELECT mat_views.drop_view('mat_views', 'test_view', true);
+DROP VIEW IF EXISTS mat_views.test_view_source;
+CREATE VIEW mat_views.test_view_source AS
+SELECT current_setting('mat_views.test_value') AS c
 UNION ALL
-SELECT current_setting('pseudo_mat_views.test_value2')
+SELECT current_setting('mat_views.test_value2')
 UNION ALL
-SELECT current_setting('pseudo_mat_views.test_value3');
+SELECT current_setting('mat_views.test_value3');
 
-SELECT pseudo_mat_views.create_view('pseudo_mat_views', 'test_view',
-                                    'pseudo_mat_views', 'test_view_source');
+SELECT mat_views.create_view('mat_views', 'test_view',
+                                    'mat_views', 'test_view_source');
 
-DROP TABLE IF EXISTS pseudo_mat_views.test_view_expected;
-CREATE TABLE pseudo_mat_views.test_view_expected (id bigint, awld
-    pseudo_mat_views.test_view, noo pseudo_mat_views.test_view_new);
+DROP TABLE IF EXISTS mat_views.test_view_expected;
+CREATE TABLE mat_views.test_view_expected (id bigint, awld
+    mat_views.test_view, noo mat_views.test_view_new);
 
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.test_view_unequal_row_count()
+    mat_views.test_view_unequal_row_count()
 RETURNS bigint AS $$
 SELECT x.c + y.c FROM (
     SELECT count(*) c
     FROM (
         SELECT *
-        FROM pseudo_mat_views.test_view
+        FROM mat_views.test_view
         EXCEPT
         SELECT *
-        FROM pseudo_mat_views.test_view_source) a) x
+        FROM mat_views.test_view_source) a) x
     CROSS JOIN (
     SELECT count(*) c
     FROM (
         SELECT *
-        FROM pseudo_mat_views.test_view_source
+        FROM mat_views.test_view_source
         EXCEPT
         SELECT *
-        FROM pseudo_mat_views.test_view) a) y;
+        FROM mat_views.test_view) a) y;
 $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
 CREATE OR REPLACE FUNCTION
-    pseudo_mat_views.test_view_unequal_rows()
+    mat_views.test_view_unequal_rows()
 RETURNS TABLE (label text, c text) AS $$
     SELECT 'Row in test_view but not in test_view_source',
            x.*
     FROM (
         SELECT *
-        FROM pseudo_mat_views.test_view
+        FROM mat_views.test_view
         EXCEPT
         SELECT *
-        FROM pseudo_mat_views.test_view_source
+        FROM mat_views.test_view_source
     ) x
     UNION ALL
     SELECT 'Row in test_view_source but not in test_view',
            y.*
     FROM (
         SELECT *
-        FROM pseudo_mat_views.test_view_source
+        FROM mat_views.test_view_source
         EXCEPT
         SELECT *
-        FROM pseudo_mat_views.test_view
+        FROM mat_views.test_view
     ) y;
 $$ LANGUAGE SQL VOLATILE SET search_path FROM CURRENT;
 
-select pseudo_mat_views.refresh_view('pseudo_mat_views', 'test_view');
+select mat_views.refresh_view('mat_views', 'test_view');
 SELECT 'TEST CASE #0';
 SELECT CASE x WHEN 0 THEN 'PASS' ELSE 'FAIL ' || CAST(x AS text) END
-FROM pseudo_mat_views.test_view_unequal_row_count() x;
-SELECT * FROM pseudo_mat_views.test_view_unequal_rows() x
-WHERE pseudo_mat_views.test_view_unequal_row_count() != 0;
+FROM mat_views.test_view_unequal_row_count() x;
+SELECT * FROM mat_views.test_view_unequal_rows() x
+WHERE mat_views.test_view_unequal_row_count() != 0;
 
-DROP TABLE IF EXISTS pseudo_mat_views.test_view_updates_expected;
-CREATE TABLE pseudo_mat_views.test_view_updates_expected
+DROP TABLE IF EXISTS mat_views.test_view_updates_expected;
+CREATE TABLE mat_views.test_view_updates_expected
     (id bigint,
-     awld pseudo_mat_views.test_view,
-     noo pseudo_mat_views.test_view_new);
+     awld mat_views.test_view,
+     noo mat_views.test_view_new);
 
 -- First TX: add sdf
 BEGIN;
-INSERT INTO pseudo_mat_views.test_view (c) SELECT 'sdf';
-INSERT INTO pseudo_mat_views.test_view_updates_expected (id, awld, noo)
-SELECT txid_current(), NULL, CAST(row('sdf') AS pseudo_mat_views.test_view_new);
-SELECT * FROM pseudo_mat_views.test_view;
-SELECT * FROM pseudo_mat_views.test_view_source;
+INSERT INTO mat_views.test_view (c) SELECT 'sdf';
+INSERT INTO mat_views.test_view_updates_expected (id, awld, noo)
+SELECT txid_current(), NULL, CAST(row('sdf') AS mat_views.test_view_new);
+SELECT * FROM mat_views.test_view;
+SELECT * FROM mat_views.test_view_source;
 
 SELECT 'TEST CASE #1';
 SELECT CASE x WHEN 0 THEN 'FAIL' ELSE 'PASS ' || CAST(x AS text) END
-FROM pseudo_mat_views.test_view_unequal_row_count() x;
-SELECT * FROM pseudo_mat_views.test_view_unequal_rows() x
-WHERE pseudo_mat_views.test_view_unequal_row_count() = 0;
+FROM mat_views.test_view_unequal_row_count() x;
+SELECT * FROM mat_views.test_view_unequal_rows() x
+WHERE mat_views.test_view_unequal_row_count() = 0;
 COMMIT;
 
 -- Second TX: add a1 then rename to a2; must yield only an insert record for a2
 BEGIN;
-INSERT INTO pseudo_mat_views.test_view (c) SELECT 'a1';
-UPDATE pseudo_mat_views.test_view SET c = 'a2' WHERE c = 'a1';
-INSERT INTO pseudo_mat_views.test_view_updates_expected (id, awld, noo)
-SELECT txid_current(), NULL, CAST(row('a2') AS pseudo_mat_views.test_view_new);
+INSERT INTO mat_views.test_view (c) SELECT 'a1';
+UPDATE mat_views.test_view SET c = 'a2' WHERE c = 'a1';
+INSERT INTO mat_views.test_view_updates_expected (id, awld, noo)
+SELECT txid_current(), NULL, CAST(row('a2') AS mat_views.test_view_new);
 
 -- Third TX: add b1, rename to b2, delete it; must yield nothing
-INSERT INTO pseudo_mat_views.test_view (c) SELECT 'b1';
-UPDATE pseudo_mat_views.test_view SET c = 'b2' WHERE c = 'b1';
-DELETE FROM pseudo_mat_views.test_view WHERE c = 'b2';
+INSERT INTO mat_views.test_view (c) SELECT 'b1';
+UPDATE mat_views.test_view SET c = 'b2' WHERE c = 'b1';
+DELETE FROM mat_views.test_view WHERE c = 'b2';
 COMMIT;
 
 -- Fourth TX: update a2 to a3 then delete it; must yield deletion of a2
 BEGIN;
-UPDATE pseudo_mat_views.test_view SET c = 'a3' WHERE c = 'a2';
-DELETE FROM pseudo_mat_views.test_view WHERE c = 'a3';
-SELECT * FROM pseudo_mat_views.test_view_updates;
-INSERT INTO pseudo_mat_views.test_view_updates_expected (id, awld, noo)
-SELECT txid_current(), CAST(row('a2') AS pseudo_mat_views.test_view), null;
+UPDATE mat_views.test_view SET c = 'a3' WHERE c = 'a2';
+DELETE FROM mat_views.test_view WHERE c = 'a3';
+SELECT * FROM mat_views.test_view_updates;
+INSERT INTO mat_views.test_view_updates_expected (id, awld, noo)
+SELECT txid_current(), CAST(row('a2') AS mat_views.test_view), null;
 COMMIT;
 
 -- Check the history table for this test
@@ -1380,28 +1383,28 @@ SELECT 'TEST CASE #2';
 SELECT CASE x.c + y.c WHEN 0 THEN 'PASS' ELSE 'FAIL ' || CAST(x.c + y.c AS text) END
 FROM (
     SELECT count(*) c FROM (
-        SELECT id, awld, noo FROM pseudo_mat_views.test_view_updates
+        SELECT id, awld, noo FROM mat_views.test_view_updates
         EXCEPT
-        SELECT id, awld, noo FROM pseudo_mat_views.test_view_updates_expected) a
+        SELECT id, awld, noo FROM mat_views.test_view_updates_expected) a
 ) x, (
     SELECT count(*) c FROM (
-        SELECT id, awld, noo FROM pseudo_mat_views.test_view_updates_expected
+        SELECT id, awld, noo FROM mat_views.test_view_updates_expected
         EXCEPT
-        SELECT id, awld, noo FROM pseudo_mat_views.test_view_updates) a
+        SELECT id, awld, noo FROM mat_views.test_view_updates) a
 ) y;
 
 -- Cleanup test
-SELECT pseudo_mat_views.drop_view('pseudo_mat_views', 'test_view', true);
-DROP TABLE pseudo_mat_views.test_view_expected;
-DROP TABLE pseudo_mat_views.test_view_updates_expected;
-DROP FUNCTION pseudo_mat_views.test_view_unequal_row_count();
+SELECT mat_views.drop_view('mat_views', 'test_view', true);
+DROP TABLE mat_views.test_view_expected;
+DROP TABLE mat_views.test_view_updates_expected;
+DROP FUNCTION mat_views.test_view_unequal_row_count();
 
 -- Grants
-GRANT USAGE                    ON SCHEMA pseudo_mat_views TO public;
-GRANT SELECT ON ALL TABLES     IN SCHEMA pseudo_mat_views TO public;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pseudo_mat_views TO public;
+GRANT USAGE                    ON SCHEMA mat_views TO public;
+GRANT SELECT ON ALL TABLES     IN SCHEMA mat_views TO public;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA mat_views TO public;
 
-CREATE OR REPLACE FUNCTION pseudo_mat_views.drop_state()
+CREATE OR REPLACE FUNCTION mat_views.drop_state()
 RETURNS void AS $$
 DECLARE
     r record;
@@ -1411,7 +1414,7 @@ BEGIN
                    s.view_name AS view_name,
                    s.source_schema_name AS source_schema_name,
                    s.source_view_name AS source_view_name
-            FROM pseudo_mat_views.state s
+            FROM mat_views.state s
             WHERE NOT EXISTS (
                 SELECT c.*
                 FROM pg_catalog.pg_class c
@@ -1431,34 +1434,34 @@ BEGIN
                 DROP TABLE IF EXISTS %1$I.%5$I CASCADE;
             $q$, r.schema_name, r.view_name, r.view_name || '_new',
             r.view_name || '_deltas', r.view_name || '_updates');
-        DELETE FROM pseudo_mat_views.state s
+        DELETE FROM mat_views.state s
         WHERE s.source_schema_name = r.source_schema_name AND
               s.source_view_name = r.source_view_name;
     END LOOP;
 END; $$ LANGUAGE PLPGSQL SECURITY DEFINER SET search_path FROM CURRENT;
 
-CREATE OR REPLACE FUNCTION pseudo_mat_views.event_trig_f_drop_state()
+CREATE OR REPLACE FUNCTION mat_views.event_trig_f_drop_state()
 RETURNS event_trigger AS $$
 DECLARE tbl record;
 BEGIN
-    IF current_setting('pseudo_mat_views.enter',true) IS NULL OR
-       current_setting('pseudo_mat_views.enter',true) = '' OR
-       NOT current_setting('pseudo_mat_views.enter',true)::boolean THEN
+    IF current_setting('mat_views.enter',true) IS NULL OR
+       current_setting('mat_views.enter',true) = '' OR
+       NOT current_setting('mat_views.enter',true)::boolean THEN
         /* Avoid inf. recursion (not needed in this case, but just in case) */
-        PERFORM set_config('pseudo_mat_views.enter','true',false);
-        PERFORM pseudo_mat_views.drop_state();
+        PERFORM set_config('mat_views.enter','true',false);
+        PERFORM mat_views.drop_state();
     END IF;
-    PERFORM set_config('pseudo_mat_views.enter','false',true);
+    PERFORM set_config('mat_views.enter','false',true);
 END; $$ LANGUAGE PLPGSQL SECURITY DEFINER SET search_path FROM CURRENT;
 
 /*
  * Cleanup state when source views are dropped (e.g., due to DROP SCHEMA ..
  * CASCADE).
  */
-CREATE EVENT TRIGGER pseudo_mat_views_drop_state_trig ON ddl_command_end
+CREATE EVENT TRIGGER mat_views_drop_state_trig ON ddl_command_end
 WHEN tag IN ('DROP VIEW')
-EXECUTE PROCEDURE pseudo_mat_views.event_trig_f_drop_state();
+EXECUTE PROCEDURE mat_views.event_trig_f_drop_state();
 
 /* Re-create trigger functions in case our code changed */
-SELECT pseudo_mat_views.create_triggers(schema_name, view_name)
-FROM pseudo_mat_views.state;
+SELECT mat_views.create_triggers(schema_name, view_name)
+FROM mat_views.state;
