@@ -19,11 +19,11 @@ Source, LLC., to PostgreSQL:
    > done | psql "$PG_URI" -f -
    ```
 
- - `pseudo_mat_views.sql`
+ - `mat_views.sql`
 
-   An alternative implementation of materialized views written entirely
-   in PlPgSQL, with the following features that MATERIALIZED VIEWs don't
-   have:
+   An alternative / enhanced implementation of materialized views
+   written entirely in PlPgSQL, with the following features that
+   MATERIALIZED VIEWs don't have:
 
     - keeps an updates table with all updates from all refreshes
     - allows DMLs on the materialized view, recording all changes in the
