@@ -54,6 +54,10 @@ Source, LLC., to PostgreSQL:
    SELECT backup.restore('some_schema'); -- restore some_schema's data
    ```
 
+ - `trigger_utils.sql`
+
+   A VIEW on `pg_catalog`.`pg_triggers` and friends.
+
  - `commit_trigger.sql`
 
    An implementation of "COMMIT TRIGGERs", with natural and useful
